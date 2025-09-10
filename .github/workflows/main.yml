@@ -1,0 +1,114 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - master
+      - develop
+  pull_request:
+
+jobs:
+  run_tests:
+    runs-on: [self-hosted, gpu, ua]
+    strategy:
+      fail-fast: false
+      matrix:
+        container: ["ghcr.io/haru-project/haru-generic-noetic:latest"]
+    container:
+      image: ${{ matrix.container }}
+      credentials:
+        username: ${{ secrets.CR_USERNAME }}
+        password: ${{ secrets.CR_TOKEN }}
+      env:
+        AGENT_TOOLSDIRECTORY: /opt/hostedtoolcache
+        RUNNER_TOOL_CACHE: /opt/hostedtoolcache
+        NVIDIA_VISIBLE_DEVICES: all
+        NVIDIA_DRIVER_CAPABILITIES: all
+      options: --runtime nvidia -v /opt/hostedtoolcache:/opt/hostedtoolcache
+    steps:
+      #----------------------------------------------
+      #       check-out repo and set-up python
+      #----------------------------------------------
+      - name: Check out repository
+        uses: actions/checkout@v4
+      #----------------------------------------------
+      #       Set up Python
+      #----------------------------------------------
+      - name: Set up Python
+        id: setup-python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.12.0
+      #----------------------------------------------
+      #  -----  install & configure poetry  -----
+      #----------------------------------------------
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          virtualenvs-path: .venv
+          installer-parallel: true
+      #----------------------------------------------
+      # Cache / restore python venv
+      #----------------------------------------------
+      - name: Cache / restore haru-nlp-core python venv
+        uses: corca-ai/local-cache@v3
+        with:
+          path: .venv
+          base: /opt/hostedtoolcache
+          key: haru-nlp-core-venv
+      #----------------------------------------------
+      # Cache / restore model files
+      #----------------------------------------------
+      - run: rm -rf ../../../github/home/.cache/haru-nlp-core
+      - name: Cache / restore haru-nlp-core models
+        uses: corca-ai/local-cache@v3
+        with:
+          path: ../../../github/home/.cache/haru-nlp-core
+          base: /opt/hostedtoolcache
+          key: haru-nlp-core-models
+      #----------------------------------------------
+      # install dependencies if cache does not exist
+      #----------------------------------------------
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+      #----------------------------------------------
+      # install the library
+      #----------------------------------------------
+      - name: Install library
+        run: poetry install --no-interaction
+      #----------------------------------------------
+      # Get release info
+      #----------------------------------------------
+      - name: Get release info
+        if: github.ref == 'refs/heads/master'
+        id: release_info
+        shell: bash
+        run: |
+            echo "::set-output name=version::$(poetry version -s)"
+      #----------------------------------------------
+      # Create release on pypi.haru-project.com
+      #----------------------------------------------
+      - name: Create release on pypi.haru-project.com
+        if: github.ref == 'refs/heads/master'
+        shell: bash
+        run: |
+          rm -rf src/haru_nlp_core/data
+          poetry config repositories.haru-pypi https://pypi.haru-project.com/
+          poetry config http-basic.haru-pypi ${{ secrets.HARU_PYPI_USERNAME }} ${{ secrets.HARU_PYPI_PASSWORD }}
+          poetry publish -n --build --repository haru-pypi
+      #----------------------------------------------
+      # Create release on GitHub
+      #----------------------------------------------
+      - name: Create Release
+        if: github.ref == 'refs/heads/master'
+        continue-on-error: true
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+            tag: ${{ steps.release_info.outputs.version }}
+            name: Release ${{ steps.release_info.outputs.version }}
+            artifacts: dist/*, cov.xml
+            draft: false
+            prerelease: false

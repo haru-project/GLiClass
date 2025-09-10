@@ -92,10 +92,65 @@ class GLiClassPreTrainedModel(PreTrainedModel):
         Retrieve language_model's attribute to check whether the model supports
         SDPA or not.
         """
-        return self.language_model._supports_sdpa
+        # Probe common top-level attributes that may point to the HF backbone
+        candidates = [
+            getattr(self, "language_model", None),
+            getattr(self, "base_model", None),
+            getattr(self, "model", None),
+        ]
+
+        # Also check common inner attributes of our wrapper model
+        if hasattr(self, "model"):
+            m = getattr(self, "model")
+            for name in ("encoder_model", "encoder_decoder_model", "label_encoder"):
+                candidates.append(getattr(m, name, None))
+
+        probe_attrs = ("_supports_sdpa", "supports_sdpa", "supports_flash_attention", "use_flash_attention", "use_xformers")
+        for obj in candidates:
+            # Avoid checking the wrapper object itself to prevent recursion
+            if obj is None or obj is self:
+                continue
+            for attr in probe_attrs:
+                if hasattr(obj, attr):
+                    try:
+                        val = getattr(obj, attr)
+                        return bool(val() if callable(val) else val)
+                    except Exception:
+                        continue
+
+        # Fallback: scan named modules for an advertised flag
+        try:
+            for _, module in self.named_modules():
+                # Skip the top-level wrapper to avoid re-entering this property
+                if module is self:
+                    continue
+                for attr in probe_attrs:
+                    if hasattr(module, attr):
+                        try:
+                            val = getattr(module, attr)
+                            return bool(val() if callable(val) else val)
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+
+        # Final fallback: try config flags if present
+        try:
+            cfg = getattr(self, "config", None) or (getattr(self, "language_model", None) and getattr(self.language_model, "config", None))
+            if cfg is not None:
+                for attr in ("supports_sdpa", "use_flash_attention", "use_xformers"):
+                    if hasattr(cfg, attr):
+                        try:
+                            return bool(getattr(cfg, attr))
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+
+        return False
 
 
-class GLiClassBaseModel(nn.Module):#):
+class GLiClassBaseModel(nn.Module):
     def __init__(self, config: GLiClassModelConfig, device='cpu', **kwargs):
         super().__init__()
         self.config = config
